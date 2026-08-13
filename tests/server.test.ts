@@ -59,6 +59,8 @@ describe("MCP server", () => {
         "codex_events",
         "codex_diff",
         "codex_artifacts",
+        "codex_record_audit_event",
+        "codex_audit",
         "codex_abort",
       ]),
     );

@@ -160,6 +160,18 @@ describe("TaskManager", () => {
 
     const events = await store.events(task.id, 0, 100);
     expect(events.some((event) => event.type === "followup.queued")).toBe(true);
+    const auditEvents = await manager.audit.events(task.id);
+    expect(auditEvents.map((event) => event.event_type)).toEqual(
+      expect.arrayContaining([
+        "chatgpt.task_instruction",
+        "codex.task_started",
+        "codex.response",
+        "chatgpt.correction",
+        "codex.followup_response",
+      ]),
+    );
+    expect(manager.audit.root).toBe(path.join(repoRoot, ".agents", "audit", "bridge"));
+    expect((await repository.diff() as { status: string[] }).status).toEqual([]);
     expect((await store.get(task.id)).threadId).toBe("thread-fixture");
   });
 

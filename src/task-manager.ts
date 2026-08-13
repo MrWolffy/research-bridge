@@ -8,6 +8,7 @@ import {
 } from "@openai/codex-sdk";
 
 import type { BridgeConfig } from "./config.js";
+import { AuditLog, type AuditActor } from "./audit.js";
 import type { RepositoryService } from "./repository.js";
 import { TaskStore, type TaskRecord } from "./store.js";
 
@@ -42,6 +43,7 @@ export class TaskManager {
   private readonly codex: CodexLike;
   private readonly executionMode: "inline" | "coordinator" | "worker";
   private readonly workerId = randomUUID();
+  readonly audit: AuditLog;
 
   constructor(
     private readonly config: BridgeConfig,
@@ -56,6 +58,9 @@ export class TaskManager {
       new Codex({
         ...(config.codexPathOverride ? { codexPathOverride: config.codexPathOverride } : {}),
       });
+    this.audit = new AuditLog(config.repoRoot, () =>
+      repository.snapshot({ excludeAuditLogs: true }),
+    );
   }
 
   async initialize(): Promise<void> {
@@ -83,6 +88,11 @@ export class TaskManager {
         });
         if (recovered) {
           await this.store.appendEvent(record.id, "bridge.recovered_interrupted_task");
+          await this.audit.append(record.id, {
+            actor: "BRIDGE",
+            eventType: "bridge.task_interrupted",
+            content: "The task worker heartbeat expired before the task reached a terminal state.",
+          });
         }
       }
     }
@@ -144,6 +154,12 @@ export class TaskManager {
       updatedAt: now,
       lastEventSeq: 0,
     };
+    await this.audit.append(record.id, {
+      actor: "CHATGPT",
+      eventType: "chatgpt.task_instruction",
+      content: instruction,
+      relatedPaths: expectedArtifacts,
+    });
     await this.store.create(record);
     await this.store.appendEvent(record.id, "task.created", {
       label: record.label,
@@ -195,6 +211,11 @@ export class TaskManager {
         record.workerHeartbeatAt = undefined;
       });
       await this.store.appendEvent(taskId, "task.failed", { message });
+      await this.audit.append(taskId, {
+        actor: "BRIDGE",
+        eventType: "bridge.task_failed",
+        content: message,
+      });
     }
     return true;
   }
@@ -209,6 +230,7 @@ export class TaskManager {
     let prompt: string | undefined = initialPrompt;
     let drained = false;
     let hasPendingAfterExit = false;
+    let followupTurn = initialPrompt === undefined;
     const heartbeat = setInterval(() => {
       void this.store.update(taskId, (record) => {
         if (record.workerId && record.workerId !== this.workerId) return;
@@ -229,6 +251,11 @@ export class TaskManager {
         record.workerPid = process.pid;
         record.workerHeartbeatAt = new Date().toISOString();
       });
+      await this.audit.append(taskId, {
+        actor: "CODEX",
+        eventType: "codex.task_started",
+        content: { thread_id: thread.id, resumed: initialPrompt === undefined },
+      });
 
       while (true) {
         if (!prompt) {
@@ -236,6 +263,7 @@ export class TaskManager {
             if (record.abortRequested) throw new Error("Task aborted by user.");
             prompt = record.pendingFollowups.shift();
             if (prompt) {
+              followupTurn = true;
               record.state = "running";
               record.completedAt = undefined;
               record.error = undefined;
@@ -252,7 +280,7 @@ export class TaskManager {
         await this.store.appendEvent(taskId, "turn.prompt", { instruction: currentPrompt });
         const streamed = await thread.runStreamed(currentPrompt, { signal: controller.signal });
         for await (const event of streamed.events) {
-          await this.captureCodexEvent(taskId, event);
+          await this.captureCodexEvent(taskId, event, followupTurn);
         }
       }
     } catch (error) {
@@ -266,6 +294,11 @@ export class TaskManager {
         hasPendingAfterExit = record.pendingFollowups.length > 0;
       });
       await this.store.appendEvent(taskId, aborted ? "task.aborted" : "task.failed", { message });
+      await this.audit.append(taskId, {
+        actor: "BRIDGE",
+        eventType: aborted ? "bridge.task_aborted" : "bridge.task_failed",
+        content: message,
+      });
     } finally {
       clearInterval(heartbeat);
       if (this.active.get(taskId) === controller) this.active.delete(taskId);
@@ -325,10 +358,19 @@ export class TaskManager {
         record.completedAt = new Date().toISOString();
       });
       await this.store.appendEvent(taskId, "task.failed", { message });
+      await this.audit.append(taskId, {
+        actor: "BRIDGE",
+        eventType: "bridge.task_failed",
+        content: message,
+      });
     }
   }
 
-  private async captureCodexEvent(taskId: string, event: ThreadEvent): Promise<void> {
+  private async captureCodexEvent(
+    taskId: string,
+    event: ThreadEvent,
+    followupTurn: boolean,
+  ): Promise<void> {
     await this.store.appendEvent(taskId, `codex.${event.type}`, event);
     if (event.type === "thread.started") {
       await this.store.update(taskId, (record) => {
@@ -339,6 +381,17 @@ export class TaskManager {
       const finalResponse = event.item.text;
       await this.store.update(taskId, (record) => {
         record.finalResponse = finalResponse;
+      });
+      await this.audit.append(taskId, {
+        actor: "CODEX",
+        eventType: followupTurn ? "codex.followup_response" : "codex.response",
+        content: finalResponse,
+      });
+    } else if (event.type === "item.completed") {
+      await this.audit.append(taskId, {
+        actor: "CODEX",
+        eventType: "codex.progress",
+        content: event,
       });
     }
     if (event.type === "turn.failed") throw new Error(event.error.message);
@@ -368,6 +421,11 @@ export class TaskManager {
       }
     });
     await this.store.appendEvent(taskId, "followup.queued", { instruction: prompt });
+    await this.audit.append(taskId, {
+      actor: "CHATGPT",
+      eventType: "chatgpt.correction",
+      content: prompt,
+    });
 
     await this.resumePendingFollowups(taskId);
     return this.store.get(taskId);
@@ -396,8 +454,24 @@ export class TaskManager {
       await this.store.appendEvent(taskId, "task.aborted", {
         message: "Task aborted by user before the worker started it.",
       });
+      await this.audit.append(taskId, {
+        actor: "BRIDGE",
+        eventType: "bridge.task_aborted",
+        content: "Task aborted by user before the worker started it.",
+      });
     }
     this.active.get(taskId)?.abort();
     return this.store.get(taskId);
+  }
+
+  async recordAuditEvent(
+    taskId: string,
+    actor: AuditActor,
+    eventType: string,
+    content: string,
+    relatedPaths: string[] = [],
+  ) {
+    await this.store.get(taskId);
+    return this.audit.append(taskId, { actor, eventType, content, relatedPaths });
   }
 }

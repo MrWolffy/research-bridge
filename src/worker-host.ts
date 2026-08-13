@@ -21,7 +21,7 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-async function acquireHostLease(config: BridgeConfig): Promise<{
+export async function acquireHostLease(config: BridgeConfig): Promise<{
   heartbeat: () => Promise<void>;
   release: () => Promise<void>;
 } | null> {
@@ -52,16 +52,22 @@ async function acquireHostLease(config: BridgeConfig): Promise<{
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      let ownerIsAlive: boolean | undefined;
       try {
         const owner = JSON.parse(await readFile(ownerFile, "utf8")) as HostLeaseOwner;
-        if (isProcessAlive(owner.pid)) return null;
+        ownerIsAlive = isProcessAlive(owner.pid);
       } catch {
         // A competing host may still be writing its owner file; directory age
         // below keeps a fresh lease from being reclaimed during that window.
       }
       try {
         const current = await stat(leaseDirectory);
-        if (Date.now() - current.mtimeMs <= config.workerLeaseMs) return null;
+        const leaseIsFresh = Date.now() - current.mtimeMs <= config.workerLeaseMs;
+        // A parsed owner that is known to be dead cannot still own the lease,
+        // even when its final heartbeat is recent. Conversely, a stale
+        // heartbeat is reclaimable even if the PID has since been reused by
+        // an unrelated process.
+        if (leaseIsFresh && ownerIsAlive !== false) return null;
       } catch (readError) {
         if ((readError as NodeJS.ErrnoException).code === "ENOENT") continue;
         throw readError;

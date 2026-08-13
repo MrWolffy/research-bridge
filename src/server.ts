@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 
@@ -22,7 +24,7 @@ export function createServer(
     { name: "research-bridge", version: "0.1.0" },
     {
       instructions:
-        "Use repo tools to inspect evidence before starting Codex tasks. codex_start_task returns immediately; poll codex_status and codex_events. Follow-ups sent during a turn are queued and run on the same Codex thread after the current turn. Treat codex_diff as repository-wide and compare it with the task baseline. Never claim an artifact exists without checking codex_artifacts.",
+        "Use repo tools to inspect evidence before starting Codex tasks. codex_start_task returns immediately; poll codex_status and codex_events. Follow-ups sent during a turn are queued and run on the same Codex thread after the current turn. Treat codex_diff as repository-wide and compare it with the task baseline. Never claim an artifact exists without checking codex_artifacts. Record ChatGPT review, test evidence, semantic review, and the final verdict with codex_record_audit_event.",
     },
   );
 
@@ -34,7 +36,13 @@ export function createServer(
     },
     async () => {
       const snapshot = await repository.snapshot();
-      return result({ ok: true, repoRoot: config.repoRoot, dataRoot: config.dataRoot, snapshot });
+      return result({
+        ok: true,
+        repoRoot: config.repoRoot,
+        dataRoot: config.dataRoot,
+        auditRoot: tasks.audit.root,
+        snapshot,
+      });
     },
   );
 
@@ -163,11 +171,63 @@ export function createServer(
       description:
         "Return the current repository-wide staged and unstaged diff plus the task baseline reference.",
       inputSchema: { task_id: z.string().uuid() },
-      annotations: { readOnlyHint: true, idempotentHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     },
     async ({ task_id }) => {
       const task = await tasks.store.get(task_id);
-      return result({ taskId: task_id, baseline: task.baseline, current: await repository.diff() });
+      const current = (await repository.diff()) as { status?: string[] };
+      await tasks.audit.append(task_id, {
+        actor: "BRIDGE",
+        eventType: "bridge.diff_inspection",
+        content: { baseline: task.baseline, current },
+        relatedPaths: (current.status ?? []).map((entry) => entry.slice(3).trim()),
+      });
+      return result({ taskId: task_id, baseline: task.baseline, current });
+    },
+  );
+
+  server.registerTool(
+    "codex_record_audit_event",
+    {
+      description:
+        "Persist review, test evidence, semantic verification, a final verdict, or explicit task closure in the audit trail.",
+      inputSchema: {
+        task_id: z.string().uuid(),
+        event_type: z.enum([
+          "chatgpt.review",
+          "bridge.test_evidence",
+          "chatgpt.semantic_review",
+          "chatgpt.final_verdict",
+          "bridge.task_closed",
+        ]),
+        content: z.string().min(1),
+        related_paths: z.array(z.string().min(1)).max(100).optional(),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    async ({ task_id, event_type, content, related_paths }) => {
+      const actor = event_type.startsWith("bridge.") ? "BRIDGE" : "CHATGPT";
+      return result(
+        await tasks.recordAuditEvent(task_id, actor, event_type, content, related_paths ?? []),
+      );
+    },
+  );
+
+  server.registerTool(
+    "codex_audit",
+    {
+      description: "Read the machine-readable audit events and report the research-workspace paths.",
+      inputSchema: { task_id: z.string().uuid() },
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async ({ task_id }) => {
+      await tasks.store.get(task_id);
+      return result({
+        taskId: task_id,
+        eventsPath: path.join(tasks.audit.root, task_id, "events.jsonl"),
+        summaryPath: path.join(tasks.audit.root, task_id, "audit.md"),
+        events: await tasks.audit.events(task_id),
+      });
     },
   );
 

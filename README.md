@@ -18,6 +18,8 @@
 | `codex_events` | 使用序列游标读取有序事件 |
 | `codex_diff` | 读取整个仓库的代码差异和任务基线 |
 | `codex_artifacts` | 检查预期产物和发生变化的路径 |
+| `codex_record_audit_event` | 写入 ChatGPT 评审、测试证据、语义复核或最终裁决 |
+| `codex_audit` | 读取机器审计事件及其研究工作区文件路径 |
 | `codex_abort` | 取消排队中或运行中的任务轮次 |
 
 ## 环境要求
@@ -75,7 +77,8 @@ node .\dist\index.js
 1. 调用 `codex_start_task` 并保存返回的 `id`。
 2. 使用 `nextAfterSeq` 游标轮询 `codex_events`，同时检查 `codex_status`。
 3. 当实现需要纠正时，调用 `codex_send_followup`。
-4. 接受结果之前，检查 `codex_diff` 和 `codex_artifacts`。
+4. 接受结果之前，检查 `codex_diff` 和 `codex_artifacts`；`codex_diff` 会自动留下 diff inspection 证据。
+5. 使用 `codex_record_audit_event` 记录 ChatGPT review、test evidence、semantic review 和 final verdict；确定不再纠正后写入 `bridge.task_closed`。
 
 ## 重要语义与安全边界
 
@@ -84,7 +87,10 @@ node .\dist\index.js
 - `codex_diff` 返回整个仓库的差异。M1 会记录任务开始时的分支、提交和未提交状态，帮助审查者区分原有改动；但是 M1 不会创建 worktree，也不会把每一行改动归因到某一个任务。
 - 产物路径必须位于目标仓库内。文件读取和搜索结果均有上限；搜索会跳过符号链接以及常见的生成目录。
 - 事件日志采用只追加的 JSONL 格式。只有 task worker 的心跳租约确认失效后，未完成任务才会变为 `interrupted`；如果此前已经捕获 Codex 线程 ID，则可以通过 follow-up 恢复任务。
+- 审计日志不写入 `research-bridge` 的数据目录。它始终写入目标研究工作区（`RESEARCH_BRIDGE_REPO_ROOT`）下的 `.agents/audit/bridge/<task-id>/`。每条机器记录都包含序号、时间、任务、actor、事件类型、原始内容、当时的 commit、dirty state 和关联路径。
+- `codex_diff`、`codex_artifacts` 和审计记录中的 dirty state 会排除 `.agents/audit/bridge/` 本身，避免审计写入污染被审查的实现差异；普通 `repo_snapshot` 仍返回完整工作区状态。
 - MCP stdio 会话与 Codex task worker 分离。`codex_start_task` 返回后，常驻 worker 会继续执行；新的 MCP 会话会依据 worker 心跳识别仍在运行的任务，不会仅因 MCP 进程退出就标记为 `interrupted`。
+- worker host lease 同时检查 owner PID 和 heartbeat：已死亡的 owner 会被立即接管；过期 heartbeat 即使遇到 PID 复用也会被回收；只有 PID 存活且 heartbeat 新鲜的 lease 才阻止第二个 worker 启动。
 - M1 只提供本地 STDIO 服务，不开放 HTTP 监听，也不实现远程认证。
 
 ## 连接 ChatGPT 网页端（仅个人使用）
@@ -149,6 +155,14 @@ pnpm run tunnel:start
     <task-id>/
       record.json
       events.jsonl
+
+<research-workspace>/
+  .agents/
+    audit/
+      bridge/
+        <task-id>/
+          events.jsonl
+          audit.md
 ```
 
-`record.json` 保存最新任务状态；`events.jsonl` 保存 bridge 生命周期事件和结构化 Codex SDK 事件流。
+`<data-dir>` 中的 `record.json` 和 `events.jsonl` 是 bridge 自身的任务状态与内部事件流。研究工作区中的 `events.jsonl` 是稳定、机器可读的审计记录，`audit.md` 会在每次审计事件追加后原子重建，供人类和 Codex 直接阅读。

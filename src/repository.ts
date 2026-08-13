@@ -16,6 +16,7 @@ const SKIPPED_DIRECTORIES = new Set([
   "venv",
   "__pycache__",
 ]);
+const AUDIT_EXCLUDE_PATHSPEC = ":(exclude).agents/audit/bridge";
 
 export interface RepoSnapshot {
   root: string;
@@ -49,12 +50,15 @@ export class RepositoryService {
     if (result.trim() !== "true") throw new Error(`${this.root} is not a Git worktree.`);
   }
 
-  async snapshot(): Promise<RepoSnapshot> {
+  async snapshot(options: { excludeAuditLogs?: boolean } = {}): Promise<RepoSnapshot> {
     await this.assertGitRepository();
+    const statusArgs = options.excludeAuditLogs
+      ? ["status", "--short", "--", ".", AUDIT_EXCLUDE_PATHSPEC]
+      : ["status", "--short"];
     const [branch, commit, statusText, entries] = await Promise.all([
       this.git(["branch", "--show-current"]),
       this.git(["rev-parse", "HEAD"]),
-      this.git(["status", "--short"]),
+      this.git(statusArgs),
       readdir(this.root, { withFileTypes: true }),
     ]);
     return {
@@ -147,9 +151,9 @@ export class RepositoryService {
 
   async diff(): Promise<object> {
     const [unstaged, staged, statusText] = await Promise.all([
-      this.git(["diff", "--no-ext-diff", "--"]),
-      this.git(["diff", "--cached", "--no-ext-diff", "--"]),
-      this.git(["status", "--short"]),
+      this.git(["diff", "--no-ext-diff", "--", ".", AUDIT_EXCLUDE_PATHSPEC]),
+      this.git(["diff", "--cached", "--no-ext-diff", "--", ".", AUDIT_EXCLUDE_PATHSPEC]),
+      this.git(["status", "--short", "--", ".", AUDIT_EXCLUDE_PATHSPEC]),
     ]);
     const combined = [
       unstaged ? `# Unstaged\n${unstaged}` : "",
@@ -184,7 +188,13 @@ export class RepositoryService {
         items.push({ path: toPosixPath(relativePath), exists: false });
       }
     }
-    const statusText = await this.git(["status", "--short"]);
+    const statusText = await this.git([
+      "status",
+      "--short",
+      "--",
+      ".",
+      AUDIT_EXCLUDE_PATHSPEC,
+    ]);
     return {
       expected: items,
       changedPaths: statusText ? statusText.split(/\r?\n/) : [],

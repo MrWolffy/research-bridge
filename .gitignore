@@ -4,3 +4,5 @@ dist/
 coverage/
 .research-bridge/
 *.log
+.env
+tools/tunnel-client.exe

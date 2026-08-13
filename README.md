@@ -84,6 +84,60 @@ node .\dist\index.js
 - 事件日志采用只追加的 JSONL 格式。如果 bridge 在任务运行期间重启，该任务会变为 `interrupted`；如果此前已经捕获 Codex 线程 ID，则可以通过 follow-up 恢复任务。
 - M1 只提供本地 STDIO 服务，不开放 HTTP 监听，也不实现远程认证。
 
+## 连接 ChatGPT 网页端（仅个人使用）
+
+本项目会读写本机仓库并启动本机 Codex，不建议直接将 HTTP 端口暴露到公网。推荐使用 OpenAI **Secure MCP Tunnel**：ChatGPT 网页端能调用 MCP，但电脑无需开放入站端口，访问权限由 tunnel 关联的 Platform 组织和 ChatGPT 工作区限定。
+
+### 1. 创建私有 tunnel
+
+1. 打开 [OpenAI Platform tunnel settings](https://platform.openai.com/settings/organization/tunnels)，创建一个 tunnel。
+2. 只关联你自己的 personal Platform organization 和你要使用的 ChatGPT workspace，不要关联其他组织或工作区。
+3. 创建一个供 `tunnel-client` 使用的 runtime API key，并为你自己保留 Tunnels Read + Use 权限。
+4. 从 tunnel settings 页面下载最新的 `tunnel-client`，将可执行文件放入 `PATH`。
+
+API key 和 tunnel id 都不应写入仓库或提交到 Git。
+
+### 2. 配置本机端
+
+先构建项目，再在当前 PowerShell 会话中设置密钥和 tunnel id：
+
+```powershell
+pnpm install
+pnpm run build
+
+$env:CONTROL_PLANE_API_KEY = 'sk-...'
+$env:RESEARCH_BRIDGE_TUNNEL_ID = 'tunnel_...'
+$env:RESEARCH_BRIDGE_REPO_ROOT = 'C:\absolute\path\to\research-repo'
+$env:RESEARCH_BRIDGE_DATA_DIR = 'C:\absolute\path\to\bridge-data'
+
+pnpm run tunnel:init
+pnpm run tunnel:doctor
+pnpm run tunnel:start
+```
+
+如果本地终端没有 `pnpm`，可以直接使用 Windows 启动器（会自动读取项目根目录中的 `.env`）：
+
+```powershell
+.\scripts\tunnel.cmd init
+.\scripts\tunnel.cmd doctor
+.\scripts\tunnel.cmd run
+```
+
+`init` 只需执行一次。如果前面已经初始化成功，日常使用只需运行 `.\scripts\tunnel.cmd run`。
+
+`tunnel:init` 只需要执行一次。以后只需在设置了 `CONTROL_PLANE_API_KEY` 和 bridge 环境变量的会话中运行 `pnpm run tunnel:start`。保持该进程运行，ChatGPT 才能访问本机 MCP。
+
+如果不设置 `RESEARCH_BRIDGE_REPO_ROOT` 和 `RESEARCH_BRIDGE_DATA_DIR`，脚本会默认使用本项目根目录和其中的 `.research-bridge` 目录。
+
+### 3. 在 ChatGPT 网页端添加
+
+1. 确保你的 ChatGPT 账号/工作区具有 developer mode 权限，并在 ChatGPT 设置中启用它。
+2. 打开 ChatGPT 的 Plugins/App 管理页，创建 developer-mode app。
+3. Connection 选择 **Tunnel**，选择刚创建的 tunnel（或粘贴 tunnel id）。
+4. 扫描工具后，先调用 `bridge_health`，再调用 `repo_snapshot` 验证连接。
+
+这个方案用你的 OpenAI 组织/工作区身份限制 tunnel 的可见性，适合个人开发和使用，不用于公开发布 plugin。如果未来要给其他用户使用，则应改为稳定的 HTTPS Streamable HTTP 端点，并实现符合 MCP 授权规范的 OAuth 2.1，不要使用共享静态 API key 代替用户认证。
+
 ## 持久化数据结构
 
 ```text

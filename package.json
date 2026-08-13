@@ -12,6 +12,9 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
+    "tunnel:init": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/secure-tunnel.ps1 -TunnelAction init",
+    "tunnel:doctor": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/secure-tunnel.ps1 -TunnelAction doctor",
+    "tunnel:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/secure-tunnel.ps1 -TunnelAction run",
     "test": "vitest run",
     "test:watch": "vitest"
   },

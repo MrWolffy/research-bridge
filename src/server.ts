@@ -198,5 +198,11 @@ export function createServer(
     async ({ task_id }) => result(await tasks.abort(task_id)),
   );
 
+  // The bridge's tool catalog is immutable for the lifetime of the process.
+  // Advertising list changes makes session-oriented clients rebuild their
+  // tool registrations unnecessarily, which can leave cached tool routes
+  // pointing at a different MCP session.
+  server.server.registerCapabilities({ tools: { listChanged: false } });
+
   return server;
 }

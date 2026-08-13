@@ -8,6 +8,8 @@ export interface BridgeConfig {
   maxReadLines: number;
   maxSearchResults: number;
   maxDiffChars: number;
+  workerPollMs: number;
+  workerLeaseMs: number;
 }
 
 function positiveInt(value: string | undefined, fallback: number): number {
@@ -32,5 +34,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     maxReadLines: positiveInt(env.RESEARCH_BRIDGE_MAX_READ_LINES, 500),
     maxSearchResults: positiveInt(env.RESEARCH_BRIDGE_MAX_SEARCH_RESULTS, 100),
     maxDiffChars: positiveInt(env.RESEARCH_BRIDGE_MAX_DIFF_CHARS, 200_000),
+    workerPollMs: positiveInt(env.RESEARCH_BRIDGE_WORKER_POLL_MS, 250),
+    workerLeaseMs: positiveInt(env.RESEARCH_BRIDGE_WORKER_LEASE_MS, 15_000),
   };
 }

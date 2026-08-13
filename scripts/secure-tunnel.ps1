@@ -87,7 +87,19 @@ switch ($TunnelAction) {
     break
   }
   "run" {
-    & $tunnelExecutable run --profile $TunnelProfile
+    $workerProcess = Start-Process `
+      -FilePath $nodeExecutable `
+      -ArgumentList @(('"{0}"' -f $serverEntry), "--worker") `
+      -WindowStyle Hidden `
+      -PassThru
+    $env:RESEARCH_BRIDGE_EXTERNAL_WORKER = "1"
+    try {
+      & $tunnelExecutable run --profile $TunnelProfile
+    } finally {
+      if ($workerProcess -and -not $workerProcess.HasExited) {
+        Stop-Process -Id $workerProcess.Id
+      }
+    }
     break
   }
 }

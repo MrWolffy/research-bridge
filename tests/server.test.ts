@@ -37,6 +37,8 @@ describe("MCP server", () => {
       maxReadLines: 500,
       maxSearchResults: 100,
       maxDiffChars: 20_000,
+      workerPollMs: 10,
+      workerLeaseMs: 1_000,
     };
     const repository = new RepositoryService(repoRoot);
     const server = createServer(config, repository, {} as TaskManager);
@@ -45,6 +47,7 @@ describe("MCP server", () => {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
     const tools = await client.listTools();
+    expect(client.getServerCapabilities()?.tools?.listChanged).toBe(false);
     expect(tools.tools.map((tool) => tool.name)).toEqual(
       expect.arrayContaining([
         "repo_snapshot",

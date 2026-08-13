@@ -71,6 +71,52 @@ class FakeCodex implements CodexLike {
   }
 }
 
+class ControlledThread implements CodexThreadLike {
+  readonly id = "thread-controlled";
+  readonly inputs: string[] = [];
+  releaseFirstTurn!: () => void;
+  private readonly firstTurnReleased = new Promise<void>((resolve) => {
+    this.releaseFirstTurn = resolve;
+  });
+
+  async runStreamed(input: string): Promise<{ events: AsyncGenerator<ThreadEvent> }> {
+    this.inputs.push(input);
+    const waitForRelease = this.firstTurnReleased;
+    async function* events(): AsyncGenerator<ThreadEvent> {
+      yield { type: "thread.started", thread_id: "thread-controlled" };
+      yield { type: "turn.started" };
+      if (input === "first") await waitForRelease;
+      yield {
+        type: "item.completed",
+        item: { id: `message-${input}`, type: "agent_message", text: `done: ${input}` },
+      };
+      yield {
+        type: "turn.completed",
+        usage: {
+          input_tokens: 1,
+          cached_input_tokens: 0,
+          cache_write_input_tokens: 0,
+          output_tokens: 1,
+          reasoning_output_tokens: 0,
+        },
+      };
+    }
+    return { events: events() };
+  }
+}
+
+class ControlledCodex implements CodexLike {
+  readonly thread = new ControlledThread();
+  resumeCalls = 0;
+  startThread(): CodexThreadLike {
+    return this.thread;
+  }
+  resumeThread(): CodexThreadLike {
+    this.resumeCalls += 1;
+    return this.thread;
+  }
+}
+
 async function waitFor(
   predicate: () => Promise<boolean>,
   timeoutMs = 2_000,
@@ -94,6 +140,8 @@ describe("TaskManager", () => {
       maxReadLines: 500,
       maxSearchResults: 100,
       maxDiffChars: 20_000,
+      workerPollMs: 10,
+      workerLeaseMs: 1_000,
     };
     const repository = new RepositoryService(repoRoot);
     const store = new TaskStore(dataRoot);
@@ -113,5 +161,107 @@ describe("TaskManager", () => {
     const events = await store.events(task.id, 0, 100);
     expect(events.some((event) => event.type === "followup.queued")).toBe(true);
     expect((await store.get(task.id)).threadId).toBe("thread-fixture");
+  });
+
+  it("keeps an active writer alive and lets it drain queued follow-ups without resuming", async () => {
+    const repoRoot = await makeRepository();
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "research-bridge-data-"));
+    temporaryDirectories.push(dataRoot);
+    const config: BridgeConfig = {
+      repoRoot,
+      dataRoot,
+      maxReadLines: 500,
+      maxSearchResults: 100,
+      maxDiffChars: 20_000,
+      workerPollMs: 10,
+      workerLeaseMs: 1_000,
+    };
+    const repository = new RepositoryService(repoRoot);
+    const store = new TaskStore(dataRoot);
+    const codex = new ControlledCodex();
+    const manager = new TaskManager(config, store, repository, codex);
+    await manager.initialize();
+
+    const task = await manager.start({ instruction: "first", sandbox: "read-only" });
+    await waitFor(async () => (await store.get(task.id)).threadId === "thread-controlled");
+
+    // Reproduce the stale persisted state seen at the writer shutdown boundary.
+    await store.update(task.id, (record) => {
+      record.state = "running";
+      record.workerHeartbeatAt = new Date(0).toISOString();
+    });
+    const otherMcpInstance = new TaskManager(
+      config,
+      new TaskStore(dataRoot),
+      repository,
+      new FakeCodex(),
+      { executionMode: "coordinator" },
+    );
+    await otherMcpInstance.initialize();
+    expect((await store.get(task.id)).state).toBe("running");
+
+    await store.update(task.id, (record) => {
+      record.state = "completed";
+    });
+    expect((await store.get(task.id)).state).toBe("completed");
+
+    await manager.followup(task.id, "second");
+    expect(codex.resumeCalls).toBe(0);
+    expect((await store.get(task.id)).pendingFollowups).toEqual(["second"]);
+
+    codex.thread.releaseFirstTurn();
+    await waitFor(async () => {
+      const current = await store.get(task.id);
+      return current.state === "completed" && current.finalResponse === "done: second";
+    });
+    expect(codex.thread.inputs).toEqual(["first", "second"]);
+    expect(codex.resumeCalls).toBe(0);
+  });
+
+  it("persists a queued task across MCP instances and lets an independent worker claim it", async () => {
+    const repoRoot = await makeRepository();
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "research-bridge-data-"));
+    temporaryDirectories.push(dataRoot);
+    const config: BridgeConfig = {
+      repoRoot,
+      dataRoot,
+      maxReadLines: 500,
+      maxSearchResults: 100,
+      maxDiffChars: 20_000,
+      workerPollMs: 10,
+      workerLeaseMs: 1_000,
+    };
+    const repository = new RepositoryService(repoRoot);
+    const coordinatorStore = new TaskStore(dataRoot);
+    const coordinator = new TaskManager(
+      config,
+      coordinatorStore,
+      repository,
+      new FakeCodex(),
+      { executionMode: "coordinator" },
+    );
+    await coordinator.initialize();
+
+    const task = await coordinator.start({ instruction: "survive MCP exit", sandbox: "read-only" });
+    expect((await coordinatorStore.get(task.id)).state).toBe("queued");
+
+    const nextMcpInstance = new TaskManager(
+      config,
+      new TaskStore(dataRoot),
+      repository,
+      new FakeCodex(),
+      { executionMode: "coordinator" },
+    );
+    await nextMcpInstance.initialize();
+    expect((await coordinatorStore.get(task.id)).state).toBe("queued");
+
+    const workerStore = new TaskStore(dataRoot);
+    const worker = new TaskManager(config, workerStore, repository, new FakeCodex(), {
+      executionMode: "worker",
+    });
+    await worker.initialize();
+    expect(await worker.runQueued(task.id)).toBe(true);
+    await waitFor(async () => (await workerStore.get(task.id)).state === "completed");
+    expect((await workerStore.get(task.id)).finalResponse).toBe("done: survive MCP exit");
   });
 });

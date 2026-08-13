@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export type TaskState =
@@ -32,6 +32,9 @@ export interface TaskRecord {
   error?: string;
   abortRequested: boolean;
   pendingFollowups: string[];
+  workerId?: string;
+  workerPid?: number;
+  workerHeartbeatAt?: string;
   createdAt: string;
   updatedAt: string;
   startedAt?: string;
@@ -71,6 +74,11 @@ export class TaskStore {
     return path.join(this.taskDirectory(taskId), "events.jsonl");
   }
 
+  private lockPath(taskId: string): string {
+    if (!/^[a-zA-Z0-9_-]+$/.test(taskId)) throw new Error("Invalid task id.");
+    return path.join(this.tasksRoot, `${taskId}.lock`);
+  }
+
   private async atomicWrite(filePath: string, content: string): Promise<void> {
     const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
     await writeFile(temporary, content, "utf8");
@@ -86,8 +94,34 @@ export class TaskStore {
     const chained = previous.then(() => current);
     this.locks.set(taskId, chained);
     await previous;
+    const lockPath = this.lockPath(taskId);
     try {
-      return await operation();
+      const deadline = Date.now() + 5_000;
+      while (true) {
+        try {
+          await mkdir(lockPath);
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          try {
+            const lockStat = await stat(lockPath);
+            if (Date.now() - lockStat.mtimeMs > 30_000) {
+              await rm(lockPath, { recursive: true, force: true });
+              continue;
+            }
+          } catch (statError) {
+            if ((statError as NodeJS.ErrnoException).code === "ENOENT") continue;
+            throw statError;
+          }
+          if (Date.now() >= deadline) throw new Error(`Timed out acquiring task lock: ${taskId}`);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+      try {
+        return await operation();
+      } finally {
+        await rm(lockPath, { recursive: true, force: true });
+      }
     } finally {
       release();
       if (this.locks.get(taskId) === chained) this.locks.delete(taskId);

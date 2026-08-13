@@ -49,6 +49,8 @@ pnpm test
 | `RESEARCH_BRIDGE_MAX_READ_LINES` | 否 | `500` | 单次文件读取返回的最大行数 |
 | `RESEARCH_BRIDGE_MAX_SEARCH_RESULTS` | 否 | `100` | 搜索返回的最大匹配数 |
 | `RESEARCH_BRIDGE_MAX_DIFF_CHARS` | 否 | `200000` | 代码差异返回的最大字符数 |
+| `RESEARCH_BRIDGE_WORKER_POLL_MS` | 否 | `250` | 常驻 worker 检查新任务的间隔 |
+| `RESEARCH_BRIDGE_WORKER_LEASE_MS` | 否 | `15000` | worker 心跳失效后才允许 recovery 的时间 |
 
 本地直接开发时可以这样启动：
 
@@ -81,7 +83,8 @@ node .\dist\index.js
 - 任务默认使用 `workspace-write`、审批策略 `never`，并关闭网络访问。Codex 沙箱仍然是主要的写入边界。
 - `codex_diff` 返回整个仓库的差异。M1 会记录任务开始时的分支、提交和未提交状态，帮助审查者区分原有改动；但是 M1 不会创建 worktree，也不会把每一行改动归因到某一个任务。
 - 产物路径必须位于目标仓库内。文件读取和搜索结果均有上限；搜索会跳过符号链接以及常见的生成目录。
-- 事件日志采用只追加的 JSONL 格式。如果 bridge 在任务运行期间重启，该任务会变为 `interrupted`；如果此前已经捕获 Codex 线程 ID，则可以通过 follow-up 恢复任务。
+- 事件日志采用只追加的 JSONL 格式。只有 task worker 的心跳租约确认失效后，未完成任务才会变为 `interrupted`；如果此前已经捕获 Codex 线程 ID，则可以通过 follow-up 恢复任务。
+- MCP stdio 会话与 Codex task worker 分离。`codex_start_task` 返回后，常驻 worker 会继续执行；新的 MCP 会话会依据 worker 心跳识别仍在运行的任务，不会仅因 MCP 进程退出就标记为 `interrupted`。
 - M1 只提供本地 STDIO 服务，不开放 HTTP 监听，也不实现远程认证。
 
 ## 连接 ChatGPT 网页端（仅个人使用）

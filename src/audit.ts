@@ -1,6 +1,7 @@
-import { appendFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rm, stat, truncate } from "node:fs/promises";
 import path from "node:path";
 
+import { atomicWriteFile, type AtomicWrite } from "./atomic-write.js";
 import type { RepoSnapshot } from "./repository.js";
 
 export type AuditActor = "CHATGPT" | "CODEX" | "BRIDGE";
@@ -110,6 +111,7 @@ export class AuditLog {
   constructor(
     repoRoot: string,
     private readonly snapshot: () => Promise<RepoSnapshot>,
+    private readonly atomicWrite: AtomicWrite = atomicWriteFile,
   ) {
     this.root = path.join(repoRoot, ".agents", "audit", "bridge");
   }
@@ -188,12 +190,29 @@ export class AuditLog {
         repo_dirty_state: repository.status,
         related_paths: input.relatedPaths ?? [],
       };
-      await appendFile(this.eventsPath(taskId), `${JSON.stringify(event)}\n`, "utf8");
+      const eventsPath = this.eventsPath(taskId);
+      let previousEventsSize = 0;
+      try {
+        previousEventsSize = (await stat(eventsPath)).size;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      await appendFile(eventsPath, `${JSON.stringify(event)}\n`, "utf8");
       events.push(event);
       const markdown = renderAuditMarkdown(taskId, events);
-      const temporary = `${this.markdownPath(taskId)}.${process.pid}.${Date.now()}.tmp`;
-      await writeFile(temporary, markdown, "utf8");
-      await rename(temporary, this.markdownPath(taskId));
+      try {
+        await this.atomicWrite(this.markdownPath(taskId), markdown);
+      } catch (error) {
+        try {
+          await truncate(eventsPath, previousEventsSize);
+        } catch (rollbackError) {
+          throw new AggregateError(
+            [error, rollbackError],
+            `Failed to persist audit ${taskId} and roll back its appended event.`,
+          );
+        }
+        throw error;
+      }
       return event;
     } finally {
       await release();

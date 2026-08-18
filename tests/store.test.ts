@@ -78,4 +78,44 @@ describe("TaskStore", () => {
     expect(events).toHaveLength(20);
     expect(events.map((event) => event.seq)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
   });
+
+  it("rolls back an appended event when its record cannot be replaced", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "research-bridge-store-"));
+    temporaryDirectories.push(root);
+    let writes = 0;
+    const store = new TaskStore(root, async (filePath, content) => {
+      writes += 1;
+      if (writes === 2) throw new Error("record replacement failed");
+      const { atomicWriteFile } = await import("../src/atomic-write.js");
+      await atomicWriteFile(filePath, content);
+    });
+    await store.initialize();
+    const now = new Date().toISOString();
+    await store.create({
+      id: "rollback_task",
+      instruction: "inspect",
+      repoRoot: root,
+      state: "running",
+      sandbox: "read-only",
+      networkAccess: false,
+      expectedArtifacts: [],
+      baseline: { branch: "main", commit: "abc", status: [], capturedAt: now },
+      abortRequested: false,
+      pendingFollowups: [],
+      createdAt: now,
+      updatedAt: now,
+      lastEventSeq: 0,
+    });
+
+    await expect(store.appendEvent("rollback_task", "failed.write")).rejects.toThrow(
+      "record replacement failed",
+    );
+    expect(await store.events("rollback_task")).toEqual([]);
+    expect((await store.get("rollback_task")).lastEventSeq).toBe(0);
+
+    await store.appendEvent("rollback_task", "successful.retry");
+    expect((await store.events("rollback_task")).map((event) => [event.seq, event.type])).toEqual([
+      [1, "successful.retry"],
+    ]);
+  });
 });

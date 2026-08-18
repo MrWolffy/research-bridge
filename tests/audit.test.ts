@@ -94,4 +94,30 @@ describe("AuditLog", () => {
       Array.from({ length: 12 }, (_, index) => index + 1),
     );
   });
+
+  it("rolls back the JSONL event when the readable audit cannot be replaced", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "research-bridge-audit-"));
+    temporaryDirectories.push(repoRoot);
+    const snapshot = async () => ({
+      root: repoRoot,
+      branch: "main",
+      commit: "abc123",
+      status: [],
+      entries: [],
+      capturedAt: new Date().toISOString(),
+    });
+    const audit = new AuditLog(repoRoot, snapshot, async () => {
+      throw new Error("audit replacement failed");
+    });
+
+    await expect(
+      audit.append("rollback_task", {
+        actor: "BRIDGE",
+        eventType: "bridge.test_evidence",
+        content: "test",
+      }),
+    ).rejects.toThrow("audit replacement failed");
+
+    expect(await audit.events("rollback_task")).toEqual([]);
+  });
 });

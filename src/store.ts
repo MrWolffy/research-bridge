@@ -1,5 +1,7 @@
-import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rm, stat, truncate, writeFile } from "node:fs/promises";
 import path from "node:path";
+
+import { atomicWriteFile, type AtomicWrite } from "./atomic-write.js";
 
 export type TaskState =
   | "queued"
@@ -53,7 +55,10 @@ export class TaskStore {
   private readonly tasksRoot: string;
   private readonly locks = new Map<string, Promise<void>>();
 
-  constructor(dataRoot: string) {
+  constructor(
+    dataRoot: string,
+    private readonly atomicWrite: AtomicWrite = atomicWriteFile,
+  ) {
     this.tasksRoot = path.join(dataRoot, "tasks");
   }
 
@@ -77,12 +82,6 @@ export class TaskStore {
   private lockPath(taskId: string): string {
     if (!/^[a-zA-Z0-9_-]+$/.test(taskId)) throw new Error("Invalid task id.");
     return path.join(this.tasksRoot, `${taskId}.lock`);
-  }
-
-  private async atomicWrite(filePath: string, content: string): Promise<void> {
-    const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(temporary, content, "utf8");
-    await rename(temporary, filePath);
   }
 
   private async exclusive<T>(taskId: string, operation: () => Promise<T>): Promise<T> {
@@ -160,16 +159,30 @@ export class TaskStore {
   async appendEvent(taskId: string, type: string, data?: unknown): Promise<StoredEvent> {
     return this.exclusive(taskId, async () => {
       const record = await this.get(taskId);
+      const eventsPath = this.eventsPath(taskId);
+      const previousEventsSize = (await stat(eventsPath)).size;
       const event: StoredEvent = {
         seq: record.lastEventSeq + 1,
         timestamp: new Date().toISOString(),
         type,
         ...(data === undefined ? {} : { data }),
       };
-      await appendFile(this.eventsPath(taskId), `${JSON.stringify(event)}\n`, "utf8");
+      await appendFile(eventsPath, `${JSON.stringify(event)}\n`, "utf8");
       record.lastEventSeq = event.seq;
       record.updatedAt = event.timestamp;
-      await this.atomicWrite(this.recordPath(taskId), `${JSON.stringify(record, null, 2)}\n`);
+      try {
+        await this.atomicWrite(this.recordPath(taskId), `${JSON.stringify(record, null, 2)}\n`);
+      } catch (error) {
+        try {
+          await truncate(eventsPath, previousEventsSize);
+        } catch (rollbackError) {
+          throw new AggregateError(
+            [error, rollbackError],
+            `Failed to persist task ${taskId} and roll back its appended event.`,
+          );
+        }
+        throw error;
+      }
       return event;
     });
   }

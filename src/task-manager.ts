@@ -38,6 +38,9 @@ export interface TaskManagerOptions {
   executionMode?: "inline" | "coordinator" | "worker";
 }
 
+const DEFAULT_MODEL = "gpt-5.6-terra";
+const DEFAULT_MODEL_REASONING_EFFORT = "high";
+
 export class TaskManager {
   private readonly active = new Map<string, AbortController>();
   private readonly codex: CodexLike;
@@ -117,7 +120,8 @@ export class TaskManager {
       sandboxMode: record.sandbox as SandboxMode,
       approvalPolicy: "never",
       networkAccessEnabled: record.networkAccess,
-      ...(record.model ? { model: record.model } : {}),
+      model: record.model ?? DEFAULT_MODEL,
+      modelReasoningEffort: DEFAULT_MODEL_REASONING_EFFORT,
     };
   }
 

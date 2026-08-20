@@ -63,10 +63,14 @@ class FakeThread implements CodexThreadLike {
 
 class FakeCodex implements CodexLike {
   readonly thread = new FakeThread();
-  startThread(_options?: ThreadOptions): CodexThreadLike {
+  readonly startOptions: Array<ThreadOptions | undefined> = [];
+  readonly resumeOptions: Array<ThreadOptions | undefined> = [];
+  startThread(options?: ThreadOptions): CodexThreadLike {
+    this.startOptions.push(options);
     return this.thread;
   }
-  resumeThread(_id: string, _options?: ThreadOptions): CodexThreadLike {
+  resumeThread(_id: string, options?: ThreadOptions): CodexThreadLike {
+    this.resumeOptions.push(options);
     return this.thread;
   }
 }
@@ -145,12 +149,17 @@ describe("TaskManager", () => {
     };
     const repository = new RepositoryService(repoRoot);
     const store = new TaskStore(dataRoot);
-    const manager = new TaskManager(config, store, repository, new FakeCodex());
+    const codex = new FakeCodex();
+    const manager = new TaskManager(config, store, repository, codex);
     await manager.initialize();
 
     const task = await manager.start({ instruction: "first", sandbox: "read-only" });
     await waitFor(async () => (await store.get(task.id)).state === "completed");
     expect((await store.get(task.id)).finalResponse).toBe("done: first");
+    expect(codex.startOptions[0]).toMatchObject({
+      model: "gpt-5.6-terra",
+      modelReasoningEffort: "high",
+    });
 
     await manager.followup(task.id, "second");
     await waitFor(async () => {
